@@ -1,0 +1,137 @@
+---
+title: "Movement Classification with Wearable Devices"
+author: "Jason Hooker"
+date: "2/20/2020"
+output:
+  pdf_document: default
+  html_document: default
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+Wearable motion tracking devices generate huge amounts of data to enable health-conscious people (or tech enthusiasts) to monitor their activity, thus allowing them to find patterns in their behavior that may help them improve their health. People often quantify how much of an activity they do, but rarer is quantifying the quality of that activity - the latter is the goal of this project. The data was collected from six participants who wore accelerometers on their belts, forearms, upper arms, and dumbbells and performed lifts correctly and in five different incorrect ways. The random forest model created is used to predict the manner in which participants did the exercise.
+
+### Reading in Data
+
+Load the necessary libraries.
+```{r loadLibraries, message=FALSE, warning=FALSE}
+library(caret)
+library(parallel)
+library(doParallel)
+library(dplyr)
+library(randomForest)
+```
+
+Read in the data for the training and testing sets, and split the raw training data into training and validation sets.
+```{r loadData}
+set.seed(12345)
+
+allTraining <- read.csv("../data/pml-training.csv", na.strings = c("NA", "", "#DIV/0!"))
+
+inTrain <- createDataPartition(y=allTraining$classe, p = 0.7, list = FALSE)
+
+training <- allTraining[inTrain,]
+validation <- allTraining[-inTrain,]
+
+testing <- read.csv("../data/pml-testing.csv",
+                    na.strings = c("NA", "", "#DIV/0!"))
+```
+
+### Feature Selection
+
+Begin feature selection by examining columns containing NAs. Each of those columns have NAs in all or nearly all rows, with only a fraction of the rows in the entire dataset containing values for these variables.
+```{r checkNACols}
+# find number of NAs in each column
+sumNAs <- colSums(is.na(training))
+
+# pull out the names of each column with at least one NA
+NAnames <- names(which(sumNAs > 0))
+
+# subset the training dataset to just include columns with at least one NA
+NAcols <- training[NAnames]
+
+# subset the training dataset to just include rows that have data in the columns containing NAs
+NAdata <- filter(training, rowSums(!is.na(NAcols)) != 0)
+dim(NAdata)
+```
+
+Of the observations containing data for the aforementioned variables, the split between the five classes is relatively even, with there being somewhat more for classe 'A'.
+```{r classeTable, echo=FALSE}
+table(NAdata$classe)
+```
+
+Because of this, we exclude all of these variables from the datasets to be used in our model. The first seven variables, which contain descriptive information for each observation and are of no predictive value, are excluded as well. These exclusions are performed on the training, testing, and validation sets.
+```{r removeNACols}
+# subset the all datasets to exclude columns with at least one NA
+subTraining <- training %>% select(which(!(names(training) %in% NAnames))) %>% select(-(1:7))
+subValidation <- validation %>% select(which(!(names(validation) %in% NAnames))) %>% select(-(1:7))
+subTesting <- testing %>% select(which(!(names(testing) %in% NAnames))) %>% select(-(1:7))
+```
+
+Now we check our smaller training dataset for any variables that may have near zero variance. We find that all have relatively significant variance, so we proceed with the datasets we have.
+```{r checkNSV}
+nsv <- nearZeroVar(subTraining, saveMetrics = TRUE)
+sum(nsv$zeroVar)
+```
+
+### Model Fitting
+
+We use random forests to train our prediction model, one without preprocessing and one preprocessing the data with Principal Component Analysis. We use cross validation with five resamples in order to get a better estimate of the accuracy of the models.
+```{r initialModel, cache=TRUE}
+x <- subTraining[,-53]
+y <- subTraining[,53]
+
+# use cross validation
+fitControl <- trainControl(method = "cv", number = 5, allowParallel = TRUE)
+
+#enable parallel processing
+cluster <- makeCluster(detectCores() - 1) # convention to leave 1 core for OS
+registerDoParallel(cluster)
+
+
+modelFit <- train(x, y, method = "rf", data = subTraining, trControl = fitControl)
+modelFitPCA <- train(x, y, method = "rf", data = subTraining, trControl = fitControl, 
+                     preProcess = "pca")
+
+# disable parallel processing
+stopCluster(cluster)
+registerDoSEQ()
+```
+
+The model without preprocessing proves to be more accurate than the PCA model, so we will use this model for prediction.
+```{r modelResults}
+modelFit$results
+modelFitPCA$results
+```
+
+### Model Accuracy on Validation Set and Out of Sample Error Estimation
+
+We now use the model to predict classe values on the validation test set and find that the accuracy remains above 99%.
+```{r confusionMatrix}
+pred <- predict(modelFit, subValidation)
+
+confusionMatrix(pred, subValidation$classe)
+```
+
+```{r outOfSampleError}
+v <- postResample(pred, subValidation$classe)
+
+OoSErrorPercent <- (1 - v[[1]]) * 100
+```
+This accuracy is used to estimate the out of sample error of the model, which comes out to be `r round(OoSErrorPercent,2)`%. 
+
+The plot below shows that accuracy of the model peaks when 2 predictors are used, though the difference in accuracy is only marginal.  
+```{r plot, echo=FALSE}
+plot(modelFit, lwd = 2, main = "Random Forest Accuracy by Predictors", xlab = "Predictors", 
+    ylab = "Accuracy")
+```
+
+### Prediction on the Testing Dataset
+
+Finally, we use the model to predict values for classe in the testing dataset. These predictions passed the course final quiz with 100% (20/20) accuracy. 
+```{r testingPrediction}
+predTest <- predict(modelFit, subTesting)
+predTest
+```
